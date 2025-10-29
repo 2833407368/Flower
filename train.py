@@ -5,7 +5,7 @@ import torchvision.transforms as transforms
 import os
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-model = timm.create_model('efficientnet_b4', pretrained=True)
+model = timm.create_model('efficientnet_b4', pretrained=True,num_classes=102)
 print(model)
 # model.eval()
 # transform = transforms.Compose([transforms.ToTensor()])
