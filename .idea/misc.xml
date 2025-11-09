@@ -3,4 +3,5 @@
   <component name="Black">
     <option name="sdkName" value="pytorch2025915" />
   </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="flower" project-jdk-type="Python SDK" />
 </project>
