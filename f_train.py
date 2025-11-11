@@ -8,6 +8,12 @@ from torch.utils.data import DataLoader, Dataset
 import os
 import timm
 from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+import numpy as np
+import utils.utils as utils
+from torch.utils.data import ConcatDataset
 
 class FlowerDataset(Dataset):
     def __init__(self, image_dir, labels, transform=None, skip_corrupted=True):
@@ -68,10 +74,11 @@ if __name__ == '__main__':
     imagenet_std = [0.229, 0.224, 0.225]
 
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(550, scale=(0.8, 1.0)),
+        transforms.RandomResizedCrop(600, scale=(0.8, 1.0)),
         transforms.Resize((600, 600)),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomVerticalFlip(p=0.1),
+        torchvision.transforms.RandAugment(num_ops=2, magnitude=12),
         transforms.RandomRotation(30),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
         transforms.ToTensor(),
@@ -114,8 +121,8 @@ if __name__ == '__main__':
         transform=val_transform
     )
 
-    train_loader = DataLoader(train_data, batch_size=16, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_data, batch_size=16, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_data, batch_size=32, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_data, batch_size=32, shuffle=False, num_workers=4)
 
     model = torchvision.models.mobilenet_v3_small()
     in_features = model.classifier[3].in_features
@@ -123,14 +130,14 @@ if __name__ == '__main__':
     model.classifier[3] = torch.nn.Linear(in_features, num_classes)
 
     # model.load_state_dict(torch.load("mobilenet_v3_small_best_model.pth", map_location=device))
-    state_dict = torch.load("mobilenet_v3_small_0.845503_best_model.pth", map_location=device)
-    state_dict.pop("classifier.3.weight", None)
-    state_dict.pop("classifier.3.bias", None)
+    state_dict = torch.load("mobilenet_v3_small_best_model_dict.pth", map_location=device)
+    # state_dict.pop("classifier.3.weight", None)
+    # state_dict.pop("classifier.3.bias", None)
     model.load_state_dict(state_dict, strict=False)
-    model.classifier[3] = torch.nn.Linear(model.classifier[3].in_features, 100)
+    # model.classifier[3] = torch.nn.Linear(model.classifier[3].in_features, 100)
     model = model.to(device)
 
-    writer = SummaryWriter("logs/11095")
+    writer = SummaryWriter("logs/11110")
     epochs = 20
 
     loss_fn = torch.nn.CrossEntropyLoss()
@@ -142,10 +149,41 @@ if __name__ == '__main__':
     print(f"当前使用的设备：{device}")
     print(f"训练集规模：{len(train_data)}，验证集规模：{len(val_data)}")
 
-    best_acc = 0
+    best_acc = 0.873
 
     for epoch in range(epochs):
         print(f"----- Epoch {epoch + 1}/{epochs} -----")
+
+        # 生成对比样本（从第2个epoch开始，需先有高相似对）
+        if epoch >= 1 and 'high_similar_pairs' in locals():
+            # 调用方法一生成混合对比样本
+            contrast_samples = utils.simple_contrast_mix(
+                base_dataset=train_data,  # 原始训练数据集
+                high_similar_pairs=high_similar_pairs,  # 高相似类别对
+                ratio=0.3,  # 对30%的高相似样本生成对比样本
+                mix_alpha=0.4  # 混合系数（A图占60%，B图占40%）
+            )
+
+            # 合并原始训练集和对比样本（假设train_data支持列表合并）
+            # train_data_with_contrast = train_data + contrast_samples
+            train_data_with_contrast = ConcatDataset([train_data, contrast_samples])
+            # 更新训练加载器
+            train_loader = DataLoader(
+                train_data_with_contrast,
+                batch_size=16,  # 保持批次大小不变
+                shuffle=True,  # 打乱顺序
+                num_workers=4  # 多线程加载
+            )
+        else:
+            # 第1个epoch用原始训练集
+            train_loader = DataLoader(
+                train_data,
+                batch_size=16,
+                shuffle=True,
+                num_workers=4
+            )
+
+
         model.train()
         total_loss = 0
         total_train_accuracy = 0
@@ -168,6 +206,8 @@ if __name__ == '__main__':
         writer.add_scalar("Train/Accuracy", avg_train_acc, epoch + 1)
 
         model.eval()
+        all_preds = []  # 存储所有预测结果
+        all_labels = []  # 存储所有真实标签
         total_val_loss = 0.0
         total_val_accuracy = 0.0
         with torch.no_grad():
@@ -176,6 +216,12 @@ if __name__ == '__main__':
                 outputs = model(images)
                 loss = loss_fn(outputs, labels)
                 total_val_loss += loss.item()
+
+                # 收集预测和真实标签
+                preds = outputs.argmax(1)
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+
                 total_val_accuracy += (outputs.argmax(1) == labels).sum().item()
 
         avg_val_loss = total_val_loss / len(val_data)
@@ -184,6 +230,28 @@ if __name__ == '__main__':
         print(f"Val Loss: {avg_val_loss:.6f}, Val Accuracy: {avg_val_acc:.6f}")
         writer.add_scalar("Val/Loss", avg_val_loss, epoch + 1)
         writer.add_scalar("Val/Accuracy", avg_val_acc, epoch + 1)
+
+        # 计算并绘制混淆矩阵
+        cm = confusion_matrix(all_labels, all_preds)
+        num_classes = len(np.unique(all_labels))  # 类别总数
+
+        # 从第2个epoch开始计算高相似对（模型有初步预测能力）
+        if epoch >= 1:
+            high_similar_pairs = utils.get_high_similar_pairs(cm, num_classes, top_k=5)
+            print(f"当前高相似类别对：{high_similar_pairs}")
+
+        # 绘制混淆矩阵热图
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=range(num_classes),
+                    yticklabels=range(num_classes))
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.title(f'Confusion Matrix - Epoch {epoch + 1}')
+
+        # 将混淆矩阵添加到TensorBoard
+        writer.add_figure(f'Confusion Matrix/Epoch {epoch + 1}', plt.gcf(), epoch + 1)
+        plt.close()
 
         scheduler.step(avg_val_acc)
         current_lr = optimizer.param_groups[0]['lr']
